@@ -1,0 +1,108 @@
+---
+title: "Covid Project"
+author: "Mitchell Izower"
+date: "10/8/2020"
+output: html_document
+---
+
+```{r} 
+library(knitr)    
+library(tidyverse) 
+library(dplyr)
+#load both tables in
+covid<-read.csv("./covidclass_without_labels.csv")
+covid2<-read.csv("./covidclass_30_percent_labels.csv")
+```
+
+```{r} 
+#build a list of most common sx of the 30% labeled list
+covid2
+covid3<-covid2 %>% separate(patientID.labels.chief.complaint., c("ID", "Value", "CC"), sep = "[.|]")
+#grouping chief complaints
+covid4<-covid3 %>% filter(Value!="") %>% group_by(Value, CC) %>% summarise(Count=n()) %>% ungroup() %>% arrange(desc(Count))
+covid4pos<-covid4 %>% filter(Value==1)
+covid4neg<-covid4 %>% filter(Value==0)
+covid4pos
+covid4neg
+```
+
+```{r} 
+#Joining tables, determining TP,TN,FP,FN
+covid5<-covid3[,c(1,3,2)] %>% rename(Result=Value)
+test2<-test %>% separate(patientID.chief.complaint., c("ID", "CC"), sep = "[.|]") %>% rename(Predicted=CovidRisk)
+covid5
+test2
+CovidJoinClass<-left_join(covid5,test2) %>% 
+  mutate(
+    Class = case_when(
+  Result==0 & Predicted==0 ~"TrueNegative",
+  Result==1 & Predicted==1 ~"TruePositive",
+  Result==0 & Predicted==1 ~"FalsePositive",
+  Result==1 & Predicted==0 ~"FalseNegative",
+))
+FilteredCJC<-CovidJoinClass %>% filter(!is.na(Class)) %>% group_by(Class,CC) %>% summarise(Count=n()) %>% ungroup()
+
+#Recording most common false positives and false negatives
+FalseNeg<-FilteredCJC %>% filter(Class=="FalseNegative") %>% arrange(desc(Count))
+FalsePos<-FilteredCJC %>% filter(Class=="FalsePositive") %>% arrange(desc(Count))
+head(FalseNeg,10)
+head(FalsePos,10)
+
+```
+
+```{r}
+#sx object contains high risk symptoms
+sx<-"fever|chills|cough|shortness of breath|SOB|difficulty breathing|fatigue|muscle aches|body aches|headache|loss of taste|loss of smell|sore throat|congestion|runny nose|nausea|vomiting|diarrhea|trouble breathing|chest pain|confusion|somnolence|blu.|abdominal pain|GI s.|dyspnea|.covid."
+
+#HRcovid dataset contains high risk patients
+HRcovid<-covid %>% dplyr::filter(stringr::str_detect(patientID.chief.complaint., regex(sx,ignore_case = TRUE))==TRUE) %>% mutate(CovidRisk=1) 
+
+#LRcovid <- covid %>% dplyr::filter(stringr::str_detect(patientID.chief.complaint., regex(sx,ignore_case = TRUE))==FALSE) %>% mutate(CovidRisk=0) 
+  
+#Joins and processes high risk data set and low risk data set
+test<-covid %>% left_join(HRcovid)
+test$CovidRisk<-replace_na(test$CovidRisk,0)
+test
+test %>% separate(patientID.chief.complaint., c("ID", "CC"), sep = "[.|]")
+
+#Counting
+Count_HighRisk_LowRisk<-test %>% group_by(CovidRisk) %>% summarise(Count=n()) %>% ungroup()
+Count_HighRisk_LowRisk
+Number_Covid_Patients<-Count_HighRisk_LowRisk[2,2]
+Number_Covid_Patients
+#Remove the comment # to run the next line, which will write/overwrite the output table
+#write.csv(test,"./covidclass_with_labels.csv")
+#write.csv(Number_Covid_Patients,"./Number of Patients with Covid")
+```
+
+```{r}
+#Refine the parser, this needs work
+TruePos<-FilteredCJC %>% filter(Class=="TruePositive") %>% arrange(desc(Count))
+TrueNeg<-FilteredCJC %>% filter(Class=="TrueNegative") %>% arrange(desc(Count))
+FalseNeg %>% rename(FalseNegative=Count) %>% select(-Class)
+FalsePos %>% rename(FalsePositive=Count) %>% select(-Class)
+TruePos %>% rename(TruePositive=Count) %>% select(-Class)
+TrueNeg %>% rename(TrueNegative=Count) %>% select(-Class)
+covid5 %>% rename(FalseNegative=Count) %>% select(-Class)
+
+covid6<-covid3 %>% group_by(CC) %>% summarise(Count=n()) %>% ungroup() %>% arrange(CC)
+
+#Me trying to capture all LE edema
+covid6 %>% dplyr::filter(stringr::str_detect(CC, regex("sw.l|edem.",ignore_case = TRUE))==TRUE) %>%  dplyr::filter(stringr::str_detect(CC, regex("ankle|hand|knee|fac.|tong.|.UE.|.swal.|upper|neck",ignore_case = TRUE))==FALSE)
+
+#Me trying to rewrite the rows where it could be replaced with just "LE edema"
+CovidJoinClass
+NolabCov<-CovidJoinClass %>% select(ID,CC) 
+
+NolabCov %>% dplyr::filter(stringr::str_detect(CC, regex("sw.l|edem.",ignore_case = TRUE))==TRUE) %>%  dplyr::filter(stringr::str_detect(CC, regex("ankle|hand|knee|fac.|tong.|.UE.|.swal.|upper|neck",ignore_case = TRUE))==FALSE) %>% mutate(CC="LE edema") %>% right_join(NolabCov) 
+
+CovidJoinClass %>%
+mutate(
+    CC = case_when(
+  CC == dplyr::filter(stringr::str_detect(CC, regex("sw.l|edem.",ignore_case = TRUE))==TRUE) &  dplyr::filter(stringr::str_detect(CC, regex("ankle|hand|knee|fac.|tong.|.UE.|.swal.|upper|neck",ignore_case = TRUE))==FALSE)
+  ~ "LE Edema"
+  
+))
+
+```
+ 

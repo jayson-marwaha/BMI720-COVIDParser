@@ -1,0 +1,44 @@
+---
+title: "Covid Project"
+author: "Mitchell Izower"
+date: "10/8/2020"
+output: html_document
+---
+
+```{r}
+library(devtools)
+library(roxygen2)
+library(testthat)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(neiss)
+library(reshape2)
+library(tidyverse) 
+library(dplyr)
+covid<-read.csv("./covidclass_without_labels.csv")
+covid
+```
+
+```{r}
+#sx object contains high risk symptoms
+sx<-"fever|chills|cough|shortness of breath|SOB|difficulty breathing|fatigue|muscle aches|body aches|headache|loss of taste|loss of smell|sore throat|congestion|runny nose|nausea|vomiting|diarrhea|trouble breathing|chest pain|confusion|somnolence|blu.|abdominal pain|GI s.|dyspnea|.covid."
+
+#HRcovid dataset contains high risk patients
+HRcovid<-covid %>% dplyr::filter(stringr::str_detect(patientID.chief.complaint., regex(sx,ignore_case = TRUE))==TRUE) %>% mutate(CovidRisk=1) 
+
+#LRcovid <- covid %>% dplyr::filter(stringr::str_detect(patientID.chief.complaint., regex(sx,ignore_case = TRUE))==FALSE) %>% mutate(CovidRisk=0) 
+  
+#Joins and processes high risk data set and low risk data set
+test<-covid %>% left_join(HRcovid)
+test$CovidRisk<-replace_na(test$CovidRisk,0)
+test
+Count_HighRisk_LowRisk<-test %>% group_by(CovidRisk) %>% summarise(Count=n()) %>% ungroup()
+Count_HighRisk_LowRisk
+Number_Covid_Patients<-Count_HighRisk_LowRisk[2,2]
+Number_Covid_Patients
+#Remove the comment # to run the next line, which will write/overwrite the output table
+#write.csv(test,"./covidclass_with_labels.csv")
+#write.csv(Number_Covid_Patients,"./Number of Patients with Covid")
+```
+ 
