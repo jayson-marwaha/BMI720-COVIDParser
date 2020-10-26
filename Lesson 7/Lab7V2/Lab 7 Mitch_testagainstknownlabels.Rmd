@@ -1,0 +1,169 @@
+---
+title: "Lab 7"
+author: "Mitchell Izower"
+date: "10/22/2020"
+output: html_document
+---
+
+```{r}
+#this is the example data that was given, don't bother running this, it's just to help trouble shoot
+#install.packages("text2vec")
+library(text2vec)
+library(data.table)
+library(magrittr)
+library(tidyverse)
+library(cutpointr)
+```
+
+```{r}
+#Me trying to use the same logic
+X<-read.csv("./CovidAllLabels.csv")
+#I can't get data() to work on X because it is not a dataset?
+#I made X a data table so some of the other functions would work
+X<-as.data.table(X) 
+#X$CC comes in as data type = factor, so had to change so tokenization worked
+X$CC<-as.character(X$CC) 
+#changed X$patientID to characters since the identical function later requires this
+X$patientID<-as.character(X$patientID)
+setDT(X)
+setkey(X, patientID)
+set.seed(2017L)
+Z<-X %>% filter(!is.na(Result)) 
+all_ids=Z$patientID
+#I am pretty sure we are training it with all phrases though I am not TOTALLY sure about that.  I don't know if we want it trained on existing values of 1/0 or our predicted values.
+train_ids=all_ids 
+#since I am not sure what we are picking, there isn't anything in this yet
+test_ids=setdiff(all_ids, train_ids) 
+#Build the train data set, J is join
+train=X[J(train_ids)]  
+test = X
+# define preprocessing function and tokenization function
+#install.packages("tokenizers")
+library(tokenizers)
+prep_fun = tolower
+tok_fun = tokenize_lines
+#the various defined terms in here are important, of note: I am using tokenize_lines as the tok_fun since it grabs the whole phrase, I donwloaded the tokenizers package to get more functionality
+it_train = itoken(train$CC, 
+             preprocessor = prep_fun, 
+             tokenizer = tok_fun, 
+             ids = train$patientID, 
+             progressbar = FALSE)
+vocab = create_vocabulary(it_train)
+
+#Now that we have a vocabulary, we can construct a document-term matrix.
+vectorizer = vocab_vectorizer(vocab)
+t1 = Sys.time()
+dtm_train = create_dtm(it_train, vectorizer)
+print(difftime(Sys.time(), t1, units = 'sec'))
+
+#dtm train is a DTM Document Term Matrix
+#check dimensions
+dim(dtm_train)  
+identical(rownames(dtm_train), train$patientID) 
+train
+``` 
+
+```{r}
+#install.packages("glmnet")
+library(glmnet)
+#The train[[']] term is the parallel here to sentiment, either 'Result' or 'Predicted'.  Since there has to be a value in the column we are selecting, I used Predicted
+NFOLDS = 4
+t1 = Sys.time()
+glmnet_classifier = cv.glmnet(x = dtm_train, y = train[['Result']], 
+                              family = 'binomial', 
+                              # L1 penalty
+                              alpha = 1,
+                              # interested in the area under ROC curve
+                              type.measure = "auc",
+                              # 5-fold cross-validation
+                              nfolds = NFOLDS,
+                              # high value is less accurate, but has faster training
+                              thresh = 1e-3,
+                              # again lower number of iterations for faster training
+                              maxit = 1e3)
+print(difftime(Sys.time(), t1, units = 'sec'))
+
+#I don't know what these are
+plot(glmnet_classifier)
+print(paste("max AUC =", round(max(glmnet_classifier$cvm), 4)))
+
+```
+```{r}
+#Testing on train data, can basically replace w/ test where train is, this is just to validate
+# Note that most text2vec functions are pipe friendly!
+it_test = tok_fun(prep_fun(test$CC))
+ 
+# turn off progressbar because it won't look nice in rmd 
+it_test = itoken(it_test, ids = test$patientID, progressbar = FALSE) 
+        
+dtm_test = create_dtm(it_test, vectorizer) 
+
+preds = predict(glmnet_classifier, dtm_test, type = 'response')[,1]  
+write.csv(as.data.frame(preds), "predictions2.csv")
+ 
+glmnet:::auc(test$Predicted, preds)  
+```
+
+```{r}
+#install.packages("dlstats")
+#install.packages("ROCR")
+#install.packages("ROCit")
+library(dlstats)
+library(ROCit)
+library(ROCR)
+
+Y<-read.csv("./CovidAllLabelswPreds.csv")
+Y<-Y %>% filter(!is.na(Result)) 
+pred <- prediction(Y$preds, Y$Result)
+perf <- performance(pred,"tpr","fpr")
+plot(perf,colorize=TRUE) 
+
+ 
+
+```
+
+```{r}
+#assinging predictions to entire dataset with a cutpoint of 0.75 based on ROC curve, then calculating top FP and FN from this
+
+entire_labeled_dataset <- read.csv("./CovidAllLabelswPreds.csv")
+
+entire_labeled_dataset <- entire_labeled_dataset %>%
+  mutate(Pred_Value = case_when(preds >= 0.75 ~ 1, preds < 0.75 ~ 0))
+
+entire_labeled_dataset <- entire_labeled_dataset %>%
+  mutate(
+    Class2 = case_when(
+    Result==0 & Pred_Value==0 ~"TrueNegative",
+    Result==1 & Pred_Value==1 ~"TruePositive",
+    Result==0 & Pred_Value==1 ~"FalsePositive",
+    Result==1 & Pred_Value==0 ~"FalseNegative",
+))
+
+FilteredCJC<-entire_labeled_dataset %>% filter(!is.na(Class2)) %>% group_by(Class2,CC) %>% summarise(Count=n()) %>% ungroup()
+
+#Recording most common false positives and false negatives
+FalseNeg<-FilteredCJC %>% filter(Class2=="FalseNegative") %>% arrange(desc(Count))
+FalsePos<-FilteredCJC %>% filter(Class2=="FalsePositive") %>% arrange(desc(Count))
+head(FalseNeg,10)
+head(FalsePos,10)
+
+
+```
+
+
+
+
+```{r}
+
+#playing around with cutpointr, ignore this chunk
+
+install.packages("cutpointr")
+library(cutpointr)
+
+cutpointr.numeric(Y, Y$preds, Y$Result, 
+                method = maximize_metric, metric = sum_sens_spec)
+Y$preds
+Y$Result
+?cutpointr.numeric
+```
+

@@ -1,0 +1,126 @@
+---
+title: "Lab 7"
+author: "Mitchell Izower"
+date: "10/22/2020"
+output: html_document
+---
+
+```{r}
+#Similar to other file, but here I split X into a test and train set of data, and compare how we did.
+
+install.packages("text2vec", dependencies = TRUE)
+install.packages("data.table")
+install.packages("magrittr")
+install.packages("glmnet")
+install.packages("futile.options")
+
+library(futile.options)
+library(text2vec)
+library(data.table)
+library(magrittr)
+library(glmnet)
+library(dplyr)
+
+#Me trying to use the same logic
+X<-read.csv("./CovidAllLabels.csv")
+#I can't get data() to work on X because it is not a dataset?
+#I made X a data table so some of the other functions would work
+X<- as.data.frame(X) 
+#X$CC comes in as data type = factor, so had to change so tokenization worked
+X$CC<-as.character(X$CC) 
+#changed X$patientID to characters since the identical function later requires this
+X$patientID<-as.character(X$patientID)
+setDT(X)
+setkey(X, patientID)
+set.seed(2017L)
+all_ids=X$patientID  
+train_ids = sample(all_ids, (length(all_ids)/2), replace=FALSE)   
+test_ids = setdiff(all_ids, train_ids)   
+#Build the train data set, J is join
+train=X[J(train_ids)]  
+test = X[J(test_ids)]
+# define preprocessing function and tokenization function
+#install.packages("tokenizers")
+#library(tokenizers)
+#tolower converts everything into lower case
+prep_fun = tolower 
+tok_fun = word_tokenizer
+#the various defined terms in here are important, of note: I am using tokenize_lines as the tok_fun since it grabs the whole phrase, I donwloaded the tokenizers package to get more functionality
+it_train = itoken(train$CC, 
+             preprocessor = prep_fun, 
+             tokenizer = tok_fun, 
+             ids = train$patientID, 
+             progressbar = FALSE)
+vocab = create_vocabulary(it_train)
+
+#Now that we have a vocabulary, we can construct a document-term matrix.
+vectorizer = vocab_vectorizer(vocab)
+t1 = Sys.time()
+dtm_train = create_dtm(it_train, vectorizer)
+print(difftime(Sys.time(), t1, units = 'sec'))
+
+#dtm train is a DTM Document Term Matrix
+#check dimensions
+dim(dtm_train)  
+identical(rownames(dtm_train), train$patientID)  
+``` 
+
+```{r}
+#install.packages("glmnet")
+#library(glmnet)
+#The train[[']] term is the parallel here to sentiment, either 'Result' or 'Predicted'.  Since there has to be a value in the column we are selecting, I used Predicted
+NFOLDS = 4
+t1 = Sys.time()
+glmnet_classifier = cv.glmnet(x = dtm_train, y = train[['Predicted']], 
+                              family = 'binomial', 
+                              # L1 penalty
+                              alpha = 1,
+                              # interested in the area under ROC curve
+                              type.measure = "auc",
+                              # 5-fold cross-validation
+                              nfolds = NFOLDS,
+                              # high value is less accurate, but has faster training
+                              thresh = 1e-3,
+                              # again lower number of iterations for faster training
+                              maxit = 1e3)
+print(difftime(Sys.time(), t1, units = 'sec'))
+
+#This output the AUC curve
+plot(glmnet_classifier)
+print(paste("max AUC =", round(max(glmnet_classifier$cvm), 4)))
+
+```
+
+
+```{r}
+#Testing on train data, can basically replace w/ test where train is, this is just to validate
+# Note that most text2vec functions are pipe friendly!
+it_test = tok_fun(prep_fun(test$CC))
+# turn off progressbar because it won't look nice in rmd
+it_test = itoken(it_test, ids = test$patientID, progressbar = FALSE) 
+
+dtm_test = create_dtm(it_test, vectorizer)
+
+preds = predict(glmnet_classifier, dtm_test, type = 'response')[,1]
+glmnet:::auc(test$Predicted, preds)
+
+preds <- data.frame(preds)
+#write.csv(preds, "test_predictions.csv")
+
+```
+
+
+```{r}
+#join preds with original dataset
+
+preds <- read.csv("./test_predictions.csv")
+preds$patientID <- as.character(preds$patientID)
+
+test_preds <- test %>%
+  left_join(preds, by = "patientID") %>%
+  mutate(Pred_Value = case_when(test_preds$preds >= 0.9 ~ "1", test_preds$preds < 0.9 ~ "0"))
+
+write.csv(test_preds, "test_prediction_values.csv")
+
+```
+
