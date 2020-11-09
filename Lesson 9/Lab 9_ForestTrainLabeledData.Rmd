@@ -1,0 +1,312 @@
+---
+title: "Lab 9 Random Forest"
+author: "Mitchell Izower"
+date: "10/22/2020"
+output: html_document
+---
+
+```{r}
+#Similar to other file, but here I split X into a test and train set of data, and compare how we did.
+#install.packages("randomForest")
+#install.packages("caTools")
+library(text2vec)
+library(data.table)
+library(magrittr)
+library(tidyverse)
+library(tokenizers)
+#install.packages("data.table")
+library(data.table)
+library(randomForest)
+library(caTools)
+library(dplyr)
+```
+
+```{r}
+Y<-read.csv("./covidclass_70percentlabels.csv")
+Q<-read.csv("./CovidAllLabels.csv") 
+#For data wrangling, first I separated all the data, then I added the cluster labels we made in openrefine
+X<-Y %>% separate(patientID.chief.complaint.chief.complaint2.30label.70label, c("patientID", "CC", "Delete", "Result30", "Result70"), sep = "[|]") %>% select(-Delete) %>% mutate(Cluster=Q$Cluster) 
+#I changed the data type of all these lines because the blog said to do that
+#https://towardsdatascience.com/random-forest-in-r-f66adf80ec9
+#Old conversions, benefit is that this replaces the unfilled values w/ NA without needing to fiddle around, though there's more elegant ways to do it..
+X$Result30<-as.numeric(X$Result30)
+X$Result70<-as.numeric(X$Result70) 
+X$Result30<-as.factor(X$Result30)
+X$Result70<-as.factor(X$Result70)   
+#Here I removed the old Result30 column, and Cluster since we aren't training with Cluster
+X<-X %>% select(-Result30) %>% select(-Cluster)
+#Here I remove all data without labeled Result70 values, and rename the data Z
+Z<-X %>% filter(!is.na(Result70))  
+#Here I rearrange the data so pivoting doesn't delete anything
+V<- Z[,c(1,3,2)]
+#Add a column of 1's so we can pivot these values, maybe there's a more elegant way to do this w/ pivotwider but I don't know how
+V<-V %>% mutate("Value"=1)
+#Replacing empty CC cells with "NA" because it breaks pivot wider when the cell is filled w/ ""
+V[which(V$CC==""),3]<-"NA"  
+#Count the unique values in CC so we can make sure the cols aren't duplicative
+length(unique(V$CC))
+#Now we pivot
+Z<-pivot_wider(V, names_from = CC, values_from = Value, values_fill = 0 ) 
+#confirming we aren't duplicating, value is 838, which is the original 2 columns and the pivoted ones
+ncol(Z) 
+#Behold, the pivoted table
+Z
+
+```
+
+```{r}
+#Following the Forest Dat Science Blog
+#The presence of pathology is label of 1; negative is 0. 
+#Splitting data into testing/training data , please keep in mind this is ONLY DATA WITH LABELS
+sample = sample.split(Z$Result70, SplitRatio = .75)
+train = subset(Z, sample == TRUE)
+test  = subset(Z, sample == FALSE)
+dim(train)
+dim(test)
+
+```
+
+```{r}
+
+#pivoting wider X, which is entire dataset, so that predictions can be made on all 9332 patients
+
+A <- X[,c(1,3,2)]
+#Add a column of 1's so we can pivot these values, maybe there's a more elegant way to do this w/ pivotwider but I don't know how
+A <- A %>% mutate("Value"=1)
+#Replacing empty CC cells with "NA" because it breaks pivot wider when the cell is filled w/ ""
+A[which(A$CC==""),3]<-"NA"  
+#Count the unique values in CC so we can make sure the cols aren't duplicative
+length(unique(A$CC))
+#Now we pivot
+B <- pivot_wider(A, names_from = CC, values_from = Value, values_fill = 0 ) 
+#confirming we aren't duplicating
+ncol(B) 
+#Behold, the pivoted table
+B
+
+```
+
+
+
+```{r}
+#We are stuck here.  Various issues. Lily said that if we pivoted the table to 0/1s for CC this could work.  I think it may be possible that it is still not working because the 0/1 are dbl and not factor (I tried w/ them as integers, but still no good).  Throws an error "Error in eval(predvars, data, env) : object 'SHORTNESS OF BREATH' not found", not sure what the deal is.  Maybe because they aren't factors?  I am struggling to turn the columns into factors, but even so, not sure that would resolve issue.
+
+names(train) <- make.names(names(train), unique=TRUE)
+names(test) <- make.names(names(test), unique=TRUE)
+#rf <- randomForest(Result70~.-patientID, data = train) #this takes several hours to run (ntree=500, mtry=28)
+rf1 <- randomForest(Result70~., data = train, mtry = 10, ntree = 10) #this is shorter
+preds <- predict(rf1, test)
+as.data.frame(preds)
+test_preds <- test %>% mutate(preds = preds) %>% select(patientID, Result70, preds)
+head(test_preds)
+
+#Z is labeled dataset
+head(Z)
+
+#X is the whole dataset
+head(X)
+dim(X)
+
+```
+
+```{r}
+
+#eliminating spaces in all column names in Z and B
+names(Z) <- make.names(names(Z), unique=TRUE)
+names(B) <- make.names(names(B), unique=TRUE)
+
+#training random forest classifier on labeled dataset, Z
+rf2 <- randomForest(Result70~.-patientID, data = Z, mtry = 15, ntree = 15)
+rf2
+
+#use this random forest classifier to assign predictions to the ENTIRE dataset of 9332 patients, B
+preds2 <- predict(rf2, B)
+preds3 <- predict(rf2, B, type = "prob")
+B_preds <- B %>% mutate(preds = preds3[,2]) %>% mutate(pred_value = preds2) %>% mutate(CC = X$CC) %>% select(patientID, CC, Result70, preds, pred_value)
+B_preds
+
+#caluclating AUC and youdens J point from classifier
+B_preds_clean <- B_preds %>% filter(is.na(Result70) == FALSE) #remove all NA values from Result70 column
+library(pROC) 
+plot(roc(B_preds_clean$Result70, B_preds_clean$preds, percent = TRUE))
+roc.ndka <- roc(B_preds_clean$Result70, B_preds_clean$preds, percent = TRUE)
+coords(roc.ndka, "best", ret="threshold", transpose = FALSE, best.method="youden")
+auc(roc.ndka)
+```
+
+```{r}
+
+#random forest error analysis
+
+B_preds <- B_preds %>%
+  mutate(
+    Class2 = case_when(
+    Result70==0 & pred_value==0 ~"TrueNegative",
+    Result70==1 & pred_value==1 ~"TruePositive",
+    Result70==0 & pred_value==1 ~"FalsePositive",
+    Result70==1 & pred_value==0 ~"FalseNegative",
+))
+
+FilteredCJC<-B_preds %>% filter(!is.na(Class2)) %>% group_by(Class2,CC) %>% summarise(Count=n()) %>% ungroup()
+
+#Recording most common false positives and false negatives
+FalseNeg<-FilteredCJC %>% filter(Class2=="FalseNegative") %>% arrange(desc(Count))
+FalsePos<-FilteredCJC %>% filter(Class2=="FalsePositive") %>% arrange(desc(Count))
+head(FalseNeg,10)
+head(FalsePos,10)
+
+#Pick lowest FN, here FN = 48, caveat, estimated J point
+B_preds %>% group_by(Class2) %>% summarise(count=n())
+
+write.csv(B_preds, file ="entire_labeled_dataset.csv")
+
+```
+
+
+
+```{r}
+#NOTE: EVERYTHING BELOW HERE IS FROM GLMNET CLASSIFIER (EARLIER ASSIGNMENTS), IRRELEVANT TO RANDOM FOREST ASSIGNMENT
+
+X<-as.data.table(X) 
+#X$CC comes in as data type = factor, so had to change so tokenization worked
+X$CC<-as.character(X$CC) 
+X$Cluster<-as.character(X$Cluster)
+#changed X$patientID to characters since the identical function later requires this
+X$patientID<-as.character(X$patientID)
+setDT(X)
+setkey(X, patientID)
+set.seed(2017L)
+all_ids=X$patientID  
+train_ids = X$patientID[!is.na(X$Result)]
+test_ids = setdiff(all_ids, train_ids)   
+#Build the train data set, J is join
+train=X[J(train_ids)]  
+test = X[J(test_ids)]
+# define preprocessing function and tokenization function
+#install.packages("tokenizers")
+#library(tokenizers)
+#tolower converts everything into lower case
+prep_fun = tolower 
+tok_fun = tokenize_lines 
+#the various defined terms in here are important, of note: I am using tokenize_lines as the tok_fun since it grabs the whole phrase, I donwloaded the tokenizers package to get more functionality
+it_train = itoken(train$CC, 
+             preprocessor = prep_fun, 
+             tokenizer = tok_fun, 
+             ids = train$patientID, 
+             progressbar = FALSE)
+vocab = create_vocabulary(it_train)
+
+#Now that we have a vocabulary, we can construct a document-term matrix.
+vectorizer = vocab_vectorizer(vocab)
+t1 = Sys.time()
+dtm_train = create_dtm(it_train, vectorizer)
+print(difftime(Sys.time(), t1, units = 'sec'))
+
+#dtm train is a DTM Document Term Matrix
+#check dimensions
+dim(dtm_train)  
+identical(rownames(dtm_train), train$patientID)  
+``` 
+
+```{r}
+#install.packages("glmnet")
+library(glmnet)
+#The train[[']] term is the parallel here to sentiment, either 'Result' or 'Predicted'.  We are training off labeled data, so choosing Result here
+NFOLDS = 4
+t1 = Sys.time()
+glmnet_classifier = cv.glmnet(x = dtm_train, y = train[['Result']], 
+                              family = 'binomial', 
+                              # L1 penalty
+                              alpha = 1,
+                              # interested in the area under ROC curve
+                              type.measure = "auc",
+                              # 5-fold cross-validation
+                              nfolds = NFOLDS,
+                              # high value is less accurate, but has faster training
+                              thresh = 1e-3,
+                              # again lower number of iterations for faster training
+                              maxit = 1e3)
+print(difftime(Sys.time(), t1, units = 'sec'))
+
+#This output the AUC curve
+plot(glmnet_classifier)
+print(paste("max AUC =", round(max(glmnet_classifier$cvm), 4)))
+
+```
+```{r}
+#Testing on testing data,  
+# Note that most text2vec functions are pipe friendly!
+it_test = tok_fun(prep_fun(test$CC))
+# turn off progressbar because it won't look nice in rmd
+it_test = itoken(it_test, ids = test$patientID, progressbar = FALSE) 
+
+dtm_test = create_dtm(it_test, vectorizer)
+
+preds = predict(glmnet_classifier, dtm_test, type = 'response')[,1]
+glmnet:::auc(test$Predicted, preds)
+```
+
+```{r}
+#install.packages("dlstats")
+#install.packages("ROCR")
+#install.packages("ROCit") 
+library(dlstats)
+library(ROCit)
+library(ROCR)
+#This sets up the test for preds
+#This section is pumping out preds for ALL id's
+it_test = tok_fun(prep_fun(X$CC))
+it_test = itoken(it_test, ids = X$patientID, progressbar = FALSE) 
+dtm_test = create_dtm(it_test, vectorizer)
+preds = predict(glmnet_classifier, dtm_test, type = 'response')[,1] 
+
+Y<-as.data.frame(preds) 
+Y<-rownames_to_column(Y, var="patientID")
+Y$patientID<-as.character(Y$patientID)  
+Y %>% arrange(patientID)
+
+ZZ<-left_join(Y,X)
+ZZZ<-ZZ %>% filter(!is.na(Result))
+pred <- prediction(ZZZ$preds, ZZZ$Result)
+perf <- performance(pred,"tpr","fpr")
+plot(perf,colorize=TRUE)
+
+ZZZ %>% select(preds,Result)
+
+```
+```{r}
+#install.packages("pROC")
+library(pROC) 
+plot(roc(ZZZ$Result, ZZZ$preds, percent = TRUE))
+roc.ndka <- roc(ZZZ$Result, ZZZ$preds, percent = TRUE)
+coords(roc.ndka, "best", ret="threshold", transpose = FALSE, best.method="youden")
+
+```
+
+
+```{r} 
+entire_labeled_dataset <- ZZ %>%
+  mutate(Pred_Value = case_when(preds >= 0.03552614	~ 1, preds < 0.03552614	~ 0))
+
+entire_labeled_dataset <- entire_labeled_dataset %>%
+  mutate(
+    Class2 = case_when(
+    Result==0 & Pred_Value==0 ~"TrueNegative",
+    Result==1 & Pred_Value==1 ~"TruePositive",
+    Result==0 & Pred_Value==1 ~"FalsePositive",
+    Result==1 & Pred_Value==0 ~"FalseNegative",
+))
+
+FilteredCJC<-entire_labeled_dataset %>% filter(!is.na(Class2)) %>% group_by(Class2,CC) %>% summarise(Count=n()) %>% ungroup()
+
+#Recording most common false positives and false negatives
+FalseNeg<-FilteredCJC %>% filter(Class2=="FalseNegative") %>% arrange(desc(Count))
+FalsePos<-FilteredCJC %>% filter(Class2=="FalsePositive") %>% arrange(desc(Count))
+head(FalseNeg,10)
+head(FalsePos,10)
+
+entire_labeled_dataset
+
+#Pick lowest FN, here FN = 48, caveat, estimated J point
+entire_labeled_dataset %>% group_by(Class2) %>% summarise(count=n())
+```
