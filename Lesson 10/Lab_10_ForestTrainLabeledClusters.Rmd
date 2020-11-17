@@ -1,0 +1,124 @@
+---
+title: "Lab 10 Random Forest"
+author: "Mitchell Izower"
+date: "10/22/2020"
+output: html_document
+---
+
+```{r}
+#Similar to other file, but here I split X into a test and train set of data, and compare how we did.
+#install.packages("randomForest")
+#install.packages("caTools")
+library(text2vec)
+library(data.table)
+library(magrittr)
+library(tidyverse)
+library(tokenizers)
+#install.packages("data.table")
+library(data.table)
+library(randomForest)
+library(caTools)
+library(dplyr)
+```
+
+```{r}
+X<-read.csv("./Result70ClusterAll.csv")  
+#I changed the data type of all these lines because the blog said to do that
+#https://towardsdatascience.com/random-forest-in-r-f66adf80ec9
+#Old conversions, benefit is that this replaces the unfilled values w/ NA without needing to fiddle around, though there's more elegant ways to do it.. 
+#Here I removed the old Result30 column, and Cluster since we aren't training with Cluster
+X<-X %>% select(-Cluster)%>% select(-CC) %>% select(-conceptID)
+#Here I remove all data without labeled Result70 values, and rename the data Z
+Z<-X %>% filter(!is.na(Result70))   
+#Add a column of 1's so we can pivot these values, maybe there's a more elegant way to do this w/ pivotwider but I don't know how
+V<-Z %>% mutate("Value"=1) 
+#Count the unique values in CC so we can make sure the cols aren't duplicative
+length(unique(V$CC))
+#Now we pivot
+Z<-pivot_wider(V, names_from = defaultDescription, values_from = Value, values_fill = 0 ) 
+#confirming we aren't duplicating, value is 838, which is the original 2 columns and the pivoted ones
+ncol(Z) 
+#Behold, the pivoted table
+Z$Result70<-as.factor(Z$Result70)
+Z$patientID<-as.character(Z$patientID)
+Z
+
+```
+
+```{r}
+
+#pivoting wider X, which is entire dataset, so that predictions can be made on all 9332 patients 
+A <- X  
+#getting data in right format
+A$Result70<-as.factor(A$Result70)
+A$patientID<-as.character(A$patientID)
+#Add a column of 1's so we can pivot these values, maybe there's a more elegant way to do this w/ pivotwider but I don't know how
+A <- A %>% mutate("Value"=1)
+#Count the unique values in CC so we can make sure the cols aren't duplicative
+length(unique(A$CC))
+#Now we pivot
+B <- pivot_wider(A, names_from = defaultDescription, values_from = Value, values_fill = 0 ) 
+#confirming we aren't duplicating
+ncol(B) 
+#Behold, the pivoted table
+B
+
+```
+
+```{r} 
+#eliminating spaces in all column names in Z and B
+names(Z) <- make.names(names(Z), unique=TRUE)
+names(B) <- make.names(names(B), unique=TRUE)
+
+#training random forest classifier on labeled dataset, Z
+rf2 <- randomForest(Result70~.-patientID, data = Z, mtry = 15, ntree = 15)
+rf2
+
+#use this random forest classifier to assign predictions to the ENTIRE dataset of 9332 patients, B
+preds3 <- predict(rf2, B, type = "prob")
+B_preds <- B %>% mutate(preds = preds3[,2]) %>% mutate(pred_value = preds2) %>% select(patientID, Result70, preds)
+B_preds
+
+```
+
+```{r}
+
+#caluclating AUC and youdens J point from classifier
+B_preds_clean <- B_preds %>% filter(is.na(Result70) == FALSE) #remove all NA values from Result70 column
+library(pROC) 
+plot(roc(B_preds_clean$Result70, B_preds_clean$preds, percent = TRUE))
+roc.ndka <- roc(B_preds_clean$Result70, B_preds_clean$preds, percent = TRUE)
+coords(roc.ndka, "best", ret="threshold", transpose = FALSE, best.method="youden")
+auc(roc.ndka)
+```
+
+```{r} 
+#random forest error analysis
+B_preds <- B_preds %>%
+  mutate(Pred_Value = case_when(preds >= 0.03333333	~ 1, preds < 0.03333333	~ 0))
+
+B_preds <- B_preds %>%
+  mutate(
+    Class2 = case_when(
+    Result70==0 & Pred_Value==0 ~"TrueNegative",
+    Result70==1 & Pred_Value==1 ~"TruePositive",
+    Result70==0 & Pred_Value==1 ~"FalsePositive",
+    Result70==1 & Pred_Value==0 ~"FalseNegative",
+))
+
+B_preds <- B_preds %>% mutate(defaultDescription=X$defaultDescription)
+
+FilteredCJC<-B_preds %>% filter(!is.na(Class2)) %>% group_by(Class2,defaultDescription) %>% summarise(Count=n()) %>% ungroup()
+
+#Recording most common false positives and false negatives
+FalseNeg<-FilteredCJC %>% filter(Class2=="FalseNegative") %>% arrange(desc(Count))
+FalsePos<-FilteredCJC %>% filter(Class2=="FalsePositive") %>% arrange(desc(Count))
+head(FalseNeg,10)
+head(FalsePos,10)
+
+#Pick lowest FN, here FN = 48, caveat, estimated J point
+B_preds %>% group_by(Class2) %>% summarise(count=n())
+
+write.csv(B_preds, file ="Lab10LabeledSet.csv")
+
+```
